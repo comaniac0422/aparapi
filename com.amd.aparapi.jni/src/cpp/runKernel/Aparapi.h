@@ -39,6 +39,11 @@
 #ifndef APARAPI_H
 #define APARAPI_H
 
+#define Aparapi_tag "APARAPI-HOST"
+#define OpenCL_tag "OPENCL-HOST"
+#define HOST_TEMPLATE_FILE "opencl/template_host.c"
+
+#define JNI_MEM_ERROR	1
 
 #include "Common.h"
 #include "com_amd_aparapi_internal_jni_KernelRunnerJNI.h"
@@ -92,5 +97,20 @@ void writeProfile(JNIEnv* jenv, JNIContext* jniContext);
 
 KernelArg* getArgForBuffer(JNIEnv* jenv, JNIContext* jniContext, jobject buffer);
 
+union ArgValue {
+	jfloat f;
+	jint i;
+	jboolean b;
+	jbyte B;
+	jlong l;
+	jdouble d;
+};
+
+struct simpleArgs {
+	union ArgValue value;
+	char *addr;	
+	size_t size;
+	unsigned int length;
+};
 
 #endif // APARAPI_H

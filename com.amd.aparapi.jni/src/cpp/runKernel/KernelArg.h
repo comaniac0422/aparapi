@@ -24,8 +24,6 @@ class KernelArg{
       static jfieldID sizeInBytesFieldID;
       static jfieldID numElementsFieldID;
 
-      const char* getTypeName();
-
       //all of these use JNIContext so they can't be inlined
 
       //get the value of a primitive arguement
@@ -44,22 +42,6 @@ class KernelArg{
       void getStaticPrimitiveValue(JNIEnv *jenv, jlong *value);
       void getStaticPrimitiveValue(JNIEnv *jenv, jdouble *value);
 
-      template<typename T> 
-      void getPrimitive(JNIEnv *jenv, int argIdx, int argPos, bool verbose, T* value) {
-         if(isStatic()) {
-            getStaticPrimitiveValue(jenv, value);
-         }
-         else {
-            getPrimitiveValue(jenv, value);
-         }
-         if (verbose) {
-             std::cerr << "clSetKernelArg " << getTypeName() << " '" << name
-                       << " ' index=" << argIdx << " pos=" << argPos 
-                       << " value=" << *value << std::endl;
-         }
-      }
-
-
    public:
       static jfieldID javaArrayFieldID; 
    public:
@@ -77,6 +59,8 @@ class KernelArg{
 
       ~KernelArg(){
       }
+
+      const char* getTypeName();
 
       void unpinAbort(JNIEnv *jenv){
          arrayBuffer->unpinAbort(jenv);
@@ -100,6 +84,21 @@ class KernelArg{
       }
       void pin(JNIEnv *jenv){
          arrayBuffer->pin(jenv);
+      }
+
+      template<typename T> 
+      void getPrimitive(JNIEnv *jenv, int argIdx, int argPos, bool verbose, T* value) {
+         if(isStatic()) {
+            getStaticPrimitiveValue(jenv, value);
+         }
+         else {
+            getPrimitiveValue(jenv, value);
+         }
+         if (verbose) {
+             std::cerr << "clSetKernelArg " << getTypeName() << " '" << name
+                       << " ' index=" << argIdx << " pos=" << argPos 
+                       << " value=" << *value << std::endl;
+         }
       }
 
       int isArray(){

@@ -38,6 +38,7 @@ under those regulations, please refer to the U.S. Bureau of Industry and Securit
 package com.amd.aparapi.internal.writer;
 
 import com.amd.aparapi.*;
+import com.amd.aparapi.Range;
 import com.amd.aparapi.internal.exception.*;
 import com.amd.aparapi.internal.instruction.*;
 import com.amd.aparapi.internal.instruction.BranchSet.LogicalExpressionNode;
@@ -799,5 +800,6 @@ public abstract class BlockWriter{
       }
    }
 
-   public abstract void write(Entrypoint entryPoint) throws CodeGenException;
+   public void write(Entrypoint entryPoint) throws CodeGenException { ; }
+   public void write(Entrypoint entryPoint, Range _range) throws CodeGenException { ; }
 }

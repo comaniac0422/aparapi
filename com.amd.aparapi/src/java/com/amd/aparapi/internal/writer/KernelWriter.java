@@ -38,6 +38,7 @@ under those regulations, please refer to the U.S. Bureau of Industry and Securit
 package com.amd.aparapi.internal.writer;
 
 import com.amd.aparapi.*;
+import com.amd.aparapi.Range;
 import com.amd.aparapi.internal.exception.*;
 import com.amd.aparapi.internal.instruction.*;
 import com.amd.aparapi.internal.instruction.InstructionSet.*;
@@ -280,7 +281,7 @@ public abstract class KernelWriter extends BlockWriter{
    public final static String CONSTANT_ANNOTATION_NAME = "L" + com.amd.aparapi.Kernel.Constant.class.getName().replace('.', '/')
          + ";";
 
-   @Override public void write(Entrypoint _entryPoint) throws CodeGenException {
+   @Override public void write(Entrypoint _entryPoint, Range _range) throws CodeGenException {
       final List<String> thisStruct = new ArrayList<String>();
       final List<String> argLines = new ArrayList<String>();
       final List<String> assigns = new ArrayList<String>();
@@ -349,9 +350,11 @@ public abstract class KernelWriter extends BlockWriter{
             // logger.fine("Examining object parameter: " + signature + " new: " + className);
             // }
             argLine.append(className);
+						System.out.println("Name: " + className);
             thisStructLine.append(className);
          } else {
             argLine.append(convertType(ClassModel.typeName(signature.charAt(0)), false));
+						System.out.println(convertType(ClassModel.typeName(signature.charAt(0)), false));
             thisStructLine.append(convertType(ClassModel.typeName(signature.charAt(0)), false));
          }
 
@@ -611,7 +614,22 @@ public abstract class KernelWriter extends BlockWriter{
          newLine();
       }
 
-      write("__kernel void " + _entryPoint.getMethodModel().getSimpleName() + "(");
+/* comaniac: What is the best group size?
+      write("__kernel __attribute__ ((reqd_work_group_size(");
+			write(_range.getLocalSize(0) + ", ");
+			if(_range.getLocalSize(1) != 0) 
+				write(_range.getLocalSize(1) + ", ");
+			else
+				write("1, ");
+			if(_range.getLocalSize(2) != 0) 
+				write(_range.getLocalSize(2) + ")))");
+			else
+				write("1)))");
+*/
+			write("__kernel");
+			newLine();
+
+			write("void " + _entryPoint.getMethodModel().getSimpleName() + "(");
 
       in();
       boolean first = true;
@@ -694,7 +712,7 @@ public abstract class KernelWriter extends BlockWriter{
       }
    }
 
-   public static String writeToString(Entrypoint _entrypoint) throws CodeGenException {
+   public static String writeToString(Entrypoint _entrypoint, Range _range) throws CodeGenException {
       final StringBuilder openCLStringBuilder = new StringBuilder();
       final KernelWriter openCLWriter = new KernelWriter(){
          @Override public void write(String _string) {
@@ -702,7 +720,7 @@ public abstract class KernelWriter extends BlockWriter{
          }
       };
       try {
-         openCLWriter.write(_entrypoint);
+         openCLWriter.write(_entrypoint, _range);
       } catch (final CodeGenException codeGenException) {
          throw codeGenException;
       }/* catch (final Throwable t) {

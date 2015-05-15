@@ -16,21 +16,27 @@ JNIContext::JNIContext(JNIEnv *jenv, jobject _kernelObject, jobject _openCLDevic
    if (flags&com_amd_aparapi_internal_jni_KernelRunnerJNI_JNI_FLAG_USE_ACC)
       deviceType = CL_DEVICE_TYPE_ACCELERATOR;
    cl_int status = CL_SUCCESS;
-   jobject platformInstance = OpenCLDevice::getPlatformInstance(jenv, openCLDeviceObject);
-   cl_platform_id platformId = OpenCLPlatform::getPlatformId(jenv, platformInstance);
-   deviceId = OpenCLDevice::getDeviceId(jenv, openCLDeviceObject);
-   cl_device_type returnedDeviceType;
-   clGetDeviceInfo(deviceId, CL_DEVICE_TYPE,  sizeof(returnedDeviceType), &returnedDeviceType, NULL);
-   //fprintf(stderr, "device[%d] CL_DEVICE_TYPE = %x\n", deviceId, returnedDeviceType);
+
+	 if(_openCLDeviceObject != NULL) { // JNIContext will contain only args if we have no internal devices.
+	   jobject platformInstance = OpenCLDevice::getPlatformInstance(jenv, openCLDeviceObject);
+	   cl_platform_id platformId = OpenCLPlatform::getPlatformId(jenv, platformInstance);
+	   deviceId = OpenCLDevice::getDeviceId(jenv, openCLDeviceObject);
+	   cl_device_type returnedDeviceType;
+	   clGetDeviceInfo(deviceId, CL_DEVICE_TYPE,  sizeof(returnedDeviceType), &returnedDeviceType, NULL);
+	   //fprintf(stderr, "device[%d] CL_DEVICE_TYPE = %x\n", deviceId, returnedDeviceType);
 
 
-   cl_context_properties cps[3] = { CL_CONTEXT_PLATFORM, (cl_context_properties)platformId, 0 };
-   cl_context_properties* cprops = (NULL == platformId) ? NULL : cps;
-   context = clCreateContextFromType( cprops, returnedDeviceType, NULL, NULL, &status); 
-   CLException::checkCLError(status, "clCreateContextFromType()");
-   if (status == CL_SUCCESS){
-      valid = JNI_TRUE;
-   }
+	   cl_context_properties cps[3] = { CL_CONTEXT_PLATFORM, (cl_context_properties)platformId, 0 };
+	   cl_context_properties* cprops = (NULL == platformId) ? NULL : cps;
+	   context = clCreateContextFromType( cprops, returnedDeviceType, NULL, NULL, &status); 
+	   CLException::checkCLError(status, "clCreateContextFromType()");
+	}
+	else
+		context = NULL;
+
+  if (status == CL_SUCCESS){
+     valid = JNI_TRUE;
+  }
 }
 
 void JNIContext::dispose(JNIEnv *jenv, Config* config) {

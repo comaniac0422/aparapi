@@ -62,6 +62,13 @@ public class Config extends ConfigJNI{
    private static final Logger logger = Logger.getLogger(Config.getLoggerName());
 
    /**
+    * Kernel file name (only used for convert phase).
+    *
+    *  Usage -Dcom.amd.aparapi.kernelFileName=string
+    */
+   public static final String kernelFileName = System.getProperty(propPkgName + ".kernelFileName");
+
+   /**
     * Allows the user to request to use a jvmti agent to 
     * access JNI code rather than loading explicitly.
     * 
@@ -78,7 +85,7 @@ public class Config extends ConfigJNI{
    /**
     * Allows the user to request a specific Kernel.EXECUTION_MODE enum value for all Kernels.
     *
-    *  Usage -Dcom.amd.aparapi.executionMode={SEQ|JTP|CPU|GPU|ACC}
+    *  Usage -Dcom.amd.aparapi.executionMode={SEQ|JTP|CPU|GPU|ACC|EXT}
     *  
     *  @see com.amd.aparapi.Kernel.EXECUTION_MODE
     */
@@ -91,6 +98,14 @@ public class Config extends ConfigJNI{
     *  
     */
    public static final boolean enableExecutionModeReporting = Boolean.getBoolean(propPkgName + ".enableExecutionModeReporting");
+
+   /**
+    * Allows the user to request that the execution phase be reported to stdout.
+    *
+    *  Usage -Dcom.amd.aparapi.enableExecutionPhaseReporting={true|false}
+    *  
+    */
+   public static final boolean enableExecutionPhaseReporting = Boolean.getBoolean(propPkgName + ".enableExecutionPhaseReporting");
 
    /**
     * Allows the user to request that generated OpenCL code is dumped to standard out.
@@ -188,7 +203,7 @@ public class Config extends ConfigJNI{
       }
 
       if (dumpFlags) {
-         System.out.println(propPkgName + ".executionMode{GPU|ACC|CPU|JTP|SEQ}=" + executionMode);
+         System.out.println(propPkgName + ".executionMode{GPU|ACC|EXT|CPU|JTP|SEQ}=" + executionMode);
          System.out.println(propPkgName + ".logLevel{OFF|FINEST|FINER|FINE|WARNING|SEVERE|ALL}=" + logger.getLevel());
          System.out.println(propPkgName + ".enableProfiling{true|false}=" + enableProfiling);
          System.out.println(propPkgName + ".enableProfilingCSV{true|false}=" + enableProfilingCSV);
@@ -197,6 +212,7 @@ public class Config extends ConfigJNI{
                + enableVerboseJNIOpenCLResourceTracking);
          System.out.println(propPkgName + ".enableShowGeneratedOpenCL{true|false}=" + enableShowGeneratedOpenCL);
          System.out.println(propPkgName + ".enableExecutionModeReporting{true|false}=" + enableExecutionModeReporting);
+	       System.out.println(propPkgName + ".enableExecutionPhaseReporting{true|false}=" + enableExecutionPhaseReporting);	
          System.out.println(propPkgName + ".enableInstructionDecodeViewer{true|false}=" + enableInstructionDecodeViewer);
          System.out.println(propPkgName
                + ".instructionListenerClassName{<class name which extends com.amd.aparapi.Config.InstructionListener>}="

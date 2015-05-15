@@ -76,6 +76,7 @@
    		  includeantruntime="false">
           <compilerarg value="-Xlint"/>
           <compilerarg value="-Xlint:-path"/>
+          <compilerarg value="-nowarn"/>
        </javac>
        <jar jarfile="${basedir}/dist/aparapi.jar" basedir="${basedir}/classes">
        		<manifest>

@@ -12,7 +12,8 @@ public abstract class Device{
       CPU,
       JTP,
       SEQ,
-      ACC
+      ACC,
+			EXT
    };
 
    /**

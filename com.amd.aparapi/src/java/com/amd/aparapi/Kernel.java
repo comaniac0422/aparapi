@@ -37,35 +37,22 @@ under those regulations, please refer to the U.S. Bureau of Industry and Securit
 */
 package com.amd.aparapi;
 
-import com.amd.aparapi.annotation.Experimental;
-import com.amd.aparapi.exception.DeprecatedException;
-import com.amd.aparapi.internal.kernel.KernelRunner;
+import com.amd.aparapi.annotation.*;
+import com.amd.aparapi.exception.*;
+import com.amd.aparapi.internal.kernel.*;
 import com.amd.aparapi.internal.model.CacheEnabler;
-import com.amd.aparapi.internal.model.ClassModel.ConstantPool.MethodReferenceEntry;
-import com.amd.aparapi.internal.model.ClassModel.ConstantPool.NameAndTypeEntry;
 import com.amd.aparapi.internal.model.ValueCache;
 import com.amd.aparapi.internal.model.ValueCache.ThrowingValueComputer;
 import com.amd.aparapi.internal.model.ValueCache.ValueComputer;
-import com.amd.aparapi.internal.opencl.OpenCLLoader;
-import com.amd.aparapi.internal.util.UnsafeWrapper;
+import com.amd.aparapi.internal.model.ClassModel.ConstantPool.*;
+import com.amd.aparapi.internal.opencl.*;
+import com.amd.aparapi.internal.util.*;
 
-import java.lang.annotation.Annotation;
-import java.lang.annotation.ElementType;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
-import java.lang.annotation.Target;
-import java.lang.reflect.Method;
-import java.util.ArrayDeque;
-import java.util.Arrays;
-import java.util.Deque;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.BrokenBarrierException;
-import java.util.concurrent.CyclicBarrier;
-import java.util.logging.Logger;
+import java.lang.annotation.*;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.logging.*;
 
 /**
  * A <i>kernel</i> encapsulates a data parallel algorithm that will execute either on a GPU
@@ -156,6 +143,37 @@ import java.util.logging.Logger;
 public abstract class Kernel implements Cloneable {
 
    private static Logger logger = Logger.getLogger(Config.getLoggerName());
+
+	 // comaniac: Explicit kernel name
+	 private String name;
+	 private static boolean useDefault = false;
+
+	 /**
+		 * @return the kernel name
+		 */
+	 public String getName() {	
+		 return name;
+	 }
+
+	/**
+	 * @param Explicit kernel name
+	 */
+	 protected Kernel(String str) {
+		 name = str;
+	 }
+
+	/**
+	 * Default constructor
+	 */
+	 protected Kernel() {
+		 if(!useDefault) {
+			 name = "Default_Kernel";
+			 useDefault = true;
+		 }
+		 else {
+		  System.out.println("Error: If you want to use multiple kernels in one class, then you must explicit kernel names!!");
+		 }
+	 }
 
    /**
     *  We can use this Annotation to 'tag' intended local buffers. 
@@ -325,6 +343,8 @@ public abstract class Kernel implements Cloneable {
     * <tr><th align="left">Enum value</th><th align="left">Execution</th></tr>
     * <tr><td><code><b>GPU</b></code></td><td>Execute using OpenCL on first available GPU device</td></tr>
     * <tr><td><code><b>ACC</b></code></td><td>Execute using OpenCL on first available Accelerator device</td></tr>
+		* <tr><td><code><b>EXT</b></code></td><td>Execute using OpenCL on external Accelerator device (independent OpenCL host 
+		*	and precompiled kernel are necessary)
     * <tr><td><code><b>CPU</b></code></td><td>Execute using OpenCL on first available CPU device</td></tr>
     * <tr><td><code><b>JTP</b></code></td><td>Execute using a Java Thread Pool (one thread spawned per available core)</td></tr>
     * <tr><td><code><b>SEQ</b></code></td><td>Execute using a single loop. This is useful for debugging but will be less 
@@ -343,7 +363,7 @@ public abstract class Kernel implements Cloneable {
     *     kernel.execute(values.length);
     * </pre></blockquote>
     * <p>
-    * Alternatively, the property <code>com.amd.aparapi.executionMode</code> can be set to one of <code>JTP,GPU,ACC,CPU,SEQ</code>
+    * Alternatively, the property <code>com.amd.aparapi.executionMode</code> can be set to one of <code>JTP,GPU,ACC,EXT,CPU,SEQ</code>
     * when an application is launched. 
     * <p><blockquote><pre>
     *    java -classpath ....;aparapi.jar -Dcom.amd.aparapi.executionMode=GPU MyApplication  
@@ -387,7 +407,11 @@ public abstract class Kernel implements Cloneable {
       /**
        * The value representing execution on an accelerator device (Xeon Phi) via OpenCL.
        */
-      ACC;
+      ACC,
+			/**
+			 * The value representing execution on an external accelerator device via independent OpenCL host.
+			**/
+			EXT;
 
       static EXECUTION_MODE getDefaultExecutionMode() {
          EXECUTION_MODE defaultExecutionMode = OpenCLLoader.isOpenCLAvailable() ? GPU : JTP;
@@ -476,6 +500,22 @@ public abstract class Kernel implements Cloneable {
       }
    };
 
+   public static enum EXECUTION_PHASE {
+      /**
+       * Execution phase of original Aparapi (convert bytecode to kernel then run).
+       */
+      ALL,
+      /**
+       * Execution phase of converting bytecode to OpenCL kernel.
+       */
+      CVT,
+      /**
+       * Execution phase of accepting an existed kernel in bit-stream and launch OpenCL runtime.
+       */
+      RUN;
+   };
+
+
    private KernelRunner kernelRunner = null;
 
    private KernelState kernelState = new KernelState();
@@ -504,7 +544,7 @@ public abstract class Kernel implements Cloneable {
        * Default constructor
        */
       protected KernelState() {
-
+	
       }
 
       /**
@@ -955,50 +995,6 @@ public abstract class Kernel implements Cloneable {
     * Every kernel must override this method.
     */
    public abstract void run();
-
-   /**
-    * Invoking this method flags that once the current pass is complete execution should be abandoned. Due to the complexity of intercommunication
-    * between java (or C) and executing OpenCL, this is the best we can do for general cancellation of execution at present. OpenCL 2.0 should introduce
-    * pipe mechanisms which will support mid-pass cancellation easily.
-    *
-    * <p>
-    * Note that in the case of thread-pool/pure java execution we could do better already, using Thread.interrupt() (and/or other means) to abandon
-    * execution mid-pass. However at present this is not attempted.
-    *
-    * @see #execute(int, int)
-    * @see #execute(Range, int)
-    * @see #execute(String, Range, int)
-    */
-   public void cancelMultiPass() {
-      if (kernelRunner == null) {
-         return;
-      }
-      kernelRunner.cancelMultiPass();
-   }
-
-   public int getCancelState() {
-      return kernelRunner == null ? KernelRunner.CANCEL_STATUS_FALSE : kernelRunner.getCancelState();
-   }
-
-   /**
-    * @see KernelRunner#getCurrentPass()
-    */
-   public int getCurrentPass() {
-      if (kernelRunner == null) {
-         return KernelRunner.PASS_ID_COMPLETED_EXECUTION;
-      }
-      return kernelRunner.getCurrentPass();
-   }
-
-   /**
-    * @see KernelRunner#isExecuting()
-    */
-   public boolean isExecuting() {
-      if (kernelRunner == null) {
-         return false;
-      }
-      return kernelRunner.isExecuting();
-   }
 
    /**
     * When using a Java Thread Pool Aparapi uses clone to copy the initial instance to each thread. 
@@ -2129,6 +2125,34 @@ public abstract class Kernel implements Cloneable {
       executionMode = EXECUTION_MODE.getFallbackExecutionMode();
    }
 
+   /**
+    * Return the current execution phase. 
+    * 
+    * Before a Kernel executes, this return value will be the execution mode as determined by the setting of 
+    * the EXECUTION_PHASE enumeration. By default, this setting is <b>RUN</b>. 
+		* This default setting can be changed by calling setExecutionPhase(). 
+    * 
+    * @return The current execution phase.
+    * 
+    * @see #setExecutionPhase(EXECUTION_PHASE)
+    */
+   public EXECUTION_PHASE getExecutionPhase() {
+      return (executionPhase);
+   }
+
+   /**
+    * Set the execution phase. 
+    * <p>
+    * Set the execution phase to either CVT (convert bytecode to kernel), or RUN (run kernel on OpenCL).
+    * 
+    * @param _executionPhase the requested execution phase.
+    * 
+    * @see #getExecutionPhase()
+    */
+   public void setExecutionPhase(EXECUTION_PHASE _executionPhase) {
+      executionPhase = _executionPhase;
+   }
+
    final static Map<String, String> typeToLetterMap = new HashMap<String, String>();
 
    static {
@@ -2750,6 +2774,8 @@ public abstract class Kernel implements Cloneable {
          executionMode = currentMode.next();
       }
    }
+
+   private EXECUTION_PHASE executionPhase = EXECUTION_PHASE.ALL;
 
    private static final ValueCache<Class<?>, Map<String, Boolean>, RuntimeException> mappedMethodFlags = markedWith(OpenCLMapping.class);
 

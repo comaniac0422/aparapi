@@ -49,11 +49,13 @@
 #include "CLHelper.h"
 #include "List.h"
 #include <algorithm>
-
-static const int PASS_ID_PREPARING_EXECUTION = -2;
-static const int PASS_ID_COMPLETED_EXECUTION = -1;
-static const int CANCEL_STATUS_FALSE = 0;
-static const int CANCEL_STATUS_TRUE = 1;
+#include <string>
+#include <math.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
+#include <sys/wait.h>
 
 //compiler dependant code
 /**
@@ -752,6 +754,347 @@ int processArgs(JNIEnv* jenv, JNIContext* jniContext, int& argPos, int& writeEve
 }
 
 /**
+ * find the next insertion position in template file
+ *
+ * @param tml_file template file to be read
+ * @param host_file host file to be written
+ *
+ */
+int findNextAparapiGeneration(FILE *tml_file, FILE *host_file)
+{
+	char tmp_buf[2048];
+
+	while(fgets(tmp_buf, 2048, tml_file) != NULL) {
+		fputs(tmp_buf, host_file);
+		if(!strncmp(tmp_buf, "// Start: Aparapi_generation", 28))
+			break;
+	}
+	return feof(tml_file);
+}
+
+/**
+ * write the result checking condition to host file
+ *
+ * @param host_file host file to be written
+ * @param var the name of the variable that wanted to be verified
+ * @param status the normal result of var
+ * @param msg the error message
+ *
+ */
+void writeResultChecking(FILE *host_file, const char *var, const char *status, const char *msg)
+{
+	fprintf(host_file, "if(%s != %s) {\n", var, status);
+	fprintf(host_file, "\tprintf(\"%s\\n\");\n", msg);
+	fprintf(host_file, "\treturn EXIT_FAILURE;\n}\n");
+	return ;
+}
+
+/**
+ * processes all of the arguments for generating an OpenCL Host
+ *
+ * @param jenv the java environment
+ * @param jniContext the context with the arguements
+ * @param range the dimension and work group size
+ * @param filename the name of host file
+ *
+ * @throws CLException
+ */
+int generateOpenCLHost(JNIEnv* jenv, JNIContext* jniContext, Range& range, jstring filename) {
+
+	cl_int status = CL_SUCCESS;
+	FILE *tml_file, *host_file;
+	char template_file[1024];
+	int argOffset = 3; // First 2 args: bit-stream name, shmid
+
+	sprintf(template_file, "%s/%s", getenv("APARAPI_HOME"), HOST_TEMPLATE_FILE);
+	tml_file = fopen(template_file, "r");
+	if(!tml_file) {
+		fprintf(stderr, "Cannot open template host file.");
+		return 1;
+	}
+
+	const char *nativeFilename = jenv->GetStringUTFChars(filename, 0);
+	host_file = fopen(nativeFilename, "w");
+	jenv->ReleaseStringUTFChars(filename, nativeFilename);
+
+	if(!host_file) {
+		fprintf(stderr, "Cannot open host file.");
+		return 1;
+	}
+
+	if(config->isVerbose())
+		fprintf(stderr, "Files have been opened.\n");
+
+	for(int argIdx = 0; argIdx < jniContext->argc; argIdx++)
+		jniContext->args[argIdx]->syncType(jenv);
+
+	// Initial and memory allocation
+	findNextAparapiGeneration(tml_file, host_file);
+
+	fprintf(host_file, "int dimension=%d;\n", range.dims);
+	fprintf(host_file, "size_t global[%d];\n", range.dims);
+	for(int i = 0; i < range.dims; ++i)
+		fprintf(host_file, "global[%d] = atoi(argv[%d]);\n", i, argOffset++);
+	fprintf(host_file, "size_t local[%d];\n", range.dims);
+	for(int i = 0; i < range.dims; ++i)
+		fprintf(host_file, "local[%d] = atoi(argv[%d]);\n", i, argOffset++);
+	
+	for(int argIdx = 0; argIdx < jniContext->argc; argIdx++) {
+		KernelArg *arg = jniContext->args[argIdx];
+
+		if(!arg->isPrimitive() && !arg->isLocal()) {
+			fprintf(host_file, "%s *%s;\n", arg->getTypeName(), arg->name);
+			fprintf(host_file, "cl_mem buf_%s;\n", arg->name);
+			fprintf(host_file, "size_t arg_%s_size = atoi(argv[%d]);\n", arg->name, argIdx + argOffset);
+			fprintf(host_file, "%s = (%s *)malloc(sizeof(%s) * arg_%s_size);\n", arg->name, arg->getTypeName(), 
+				arg->getTypeName(), arg->name);
+		}
+		else if(arg->isLocal())
+			fprintf(host_file, "size_t arg_%s_size = atoi(argv[%d]);\n", arg->name, argIdx + argOffset);
+	}
+
+	// Get data from shared memory
+	findNextAparapiGeneration(tml_file, host_file);
+	for(int argIdx = 0; argIdx < jniContext->argc; argIdx++) {
+		KernelArg *arg = jniContext->args[argIdx];
+
+		if(!arg->isPrimitive() && !arg->isLocal()) {
+			if(arg->isReadByKernel()) {
+				fprintf(host_file, "memcpy(%s, cur_addr, sizeof(%s) * arg_%s_size);\n", 
+					arg->name, arg->getTypeName(), arg->name);
+				fprintf(host_file, "cur_addr += sizeof(%s) * arg_%s_size;\n", 
+					arg->getTypeName(), arg->name);
+			}
+		}
+	}
+
+	fprintf(host_file, "} else { ; }\n"); // Testing mode
+
+	// Setup buffer
+	findNextAparapiGeneration(tml_file, host_file);
+	for(int argIdx = 0; argIdx < jniContext->argc; argIdx++) {
+		KernelArg *arg = jniContext->args[argIdx];
+
+		if(!arg->isPrimitive() && !arg->isLocal()) {
+			cl_uint mask = CL_MEM_USE_HOST_PTR;
+			if (arg->isReadByKernel() && arg->isMutableByKernel()) mask |= CL_MEM_READ_WRITE;
+			else if (arg->isReadByKernel() && !arg->isMutableByKernel()) mask |= CL_MEM_READ_ONLY;
+			else if (arg->isMutableByKernel()) mask |= CL_MEM_WRITE_ONLY;
+			
+			fprintf(host_file, "buf_%s = clCreateBuffer(context, %u, sizeof(%s) * arg_%s_size, %s, &err);\n", 
+				arg->name, mask, arg->getTypeName(), arg->name, arg->name);
+			writeResultChecking(host_file, "err", "CL_SUCCESS", "Error: Failed to allocate device memory!");
+
+			if(arg->isReadByKernel()) {
+				fprintf(host_file, 
+						"err = clEnqueueWriteBuffer(commands, buf_%s, CL_TRUE, 0, sizeof(%s) * arg_%s_size, %s, 0, NULL, NULL);\n", 
+						arg->name, arg->getTypeName(), arg->name, arg->name);
+				writeResultChecking(host_file, "err", "CL_SUCCESS", "Error: Failed to write to source array!");
+			}
+			fprintf(host_file, "err  = clSetKernelArg(kernel, %d, sizeof(buf_%s), &buf_%s);\n", argIdx, arg->name, arg->name);
+		}
+		else if (arg->isLocal())
+			fprintf(host_file, "err  = clSetKernelArg(kernel, %d, sizeof(%s), arg_%s_size);\n", argIdx, arg->name, arg->name);
+		else
+			fprintf(host_file, "err  = clSetKernelArg(kernel, %d, sizeof(%s), &%s);\n", argIdx, arg->name, arg->name);	
+		writeResultChecking(host_file, "err", "CL_SUCCESS", "Error: Failed to set kernel arguments!");
+	}
+	fprintf(host_file, "err  = clSetKernelArg(kernel, %d, sizeof(passid), &passid);\n", jniContext->argc);
+	writeResultChecking(host_file, "err", "CL_SUCCESS", "Error: Failed to set kernel arguments!");
+
+	// Read results
+	int waitEventCount(0);
+	findNextAparapiGeneration(tml_file, host_file);
+	fprintf(host_file, "cl_event readevent[%d];\n", jniContext->argc);
+	for(int argIdx = 0; argIdx < jniContext->argc; argIdx++) {
+		KernelArg *arg = jniContext->args[argIdx];
+
+			if(arg->needToEnqueueRead()) {
+				if(arg->isArray()) {
+					fprintf(host_file, " err = clEnqueueReadBuffer(commands, buf_%s, CL_TRUE, 0,\n", arg->name);
+					fprintf(host_file, "sizeof(%s) * arg_%s_size, %s, 0, NULL, &readevent[%d]);\n", 
+						arg->getTypeName(), arg->name, arg->name, waitEventCount);
+					writeResultChecking(host_file, "err", "CL_SUCCESS", "Error: Failed to read output array!");
+				}
+				else if(arg->isAparapiBuffer())
+					fprintf(stderr, "WARNING: Aparapi buffer %s hasn't been covered\n", arg->name);
+				waitEventCount++;
+			}
+	}
+	fprintf(host_file, "clWaitForEvents(%d, readevent);\n", waitEventCount);
+
+	// Send results back
+	findNextAparapiGeneration(tml_file, host_file);
+	fprintf(host_file, "cur_addr = shm_addr + strlen(opencl_tag);\n");
+	for(int argIdx = 0; argIdx < jniContext->argc; argIdx++) {
+		KernelArg *arg = jniContext->args[argIdx];
+
+		if(arg->isMutableByKernel()) {
+			fprintf(host_file, "memcpy(cur_addr, %s, sizeof(%s) * arg_%s_size);\n", 
+				arg->name, arg->getTypeName(), arg->name);
+			fprintf(host_file, "cur_addr += sizeof(%s) * arg_%s_size;\n", arg->getTypeName(), arg->name);
+		}
+	}
+
+	// Release memory objects
+	findNextAparapiGeneration(tml_file, host_file);
+	for(int argIdx = 0; argIdx < jniContext->argc; argIdx++) {
+		KernelArg *arg = jniContext->args[argIdx];
+
+		if(!arg->isPrimitive() && !arg->isLocal())
+			fprintf(host_file, "clReleaseMemObject(buf_%s);\n", arg->name);
+	}
+
+	while(!findNextAparapiGeneration(tml_file, host_file));
+	fclose(tml_file);
+	fclose(host_file);
+
+	return status;
+}
+
+
+/**
+ * processes all of the arguments for external kernel. This is a fork function from processArgs
+ *
+ * @param jenv the java environment
+ * @param jniContext the context with the arguements
+ * @param argPos out: the absolute position of the last argument
+ * @param shmid: the ID of created shared memory
+ * @param size: the size of shared memory
+ *
+ */
+int processArgsforExternal(JNIEnv* jenv, JNIContext* jniContext, 
+		int& argPos, int& shmid, size_t& BUFFER_SIZE) {
+
+   char *shm_addr, *cur_addr;
+	 struct simpleArgs tmpArgs[jniContext->argc];
+	 if(config->isVerbose())
+	    fprintf(stderr, "processArgsforExternal\n");
+	 BUFFER_SIZE = 128; // Initial reserved 128 bytes.
+
+   // Go through every arguments, compute and record total shared memory size.
+   for(int argIdx = 0; argIdx < jniContext->argc; argIdx++, argPos++) {
+      KernelArg *arg = jniContext->args[argIdx];
+	 		arg->syncType(jenv);
+	 	  arg->pin(jenv);
+      if(config->isVerbose())
+			   fprintf(stderr, "Arg %d ", argIdx);
+
+			if(!arg->isReadByKernel()) { // Only put input data into shared memory.
+				if(config->isVerbose())
+					fprintf(stderr, "not input date, skip.\n");
+				tmpArgs[argIdx].addr = 0;
+				tmpArgs[argIdx].size = -1;
+				continue;
+			}
+
+      if(!arg->isPrimitive() && !arg->isLocal()) { // Process object
+				 if(config->isVerbose())
+				    fprintf(stderr, "object, +%d\n", arg->arrayBuffer->lengthInBytes);
+		     if(arg->isArray()) {
+				    BUFFER_SIZE += arg->arrayBuffer->lengthInBytes;
+					  tmpArgs[argIdx].addr = (char *) arg->arrayBuffer->addr;
+						tmpArgs[argIdx].size = arg->arrayBuffer->lengthInBytes;
+						tmpArgs[argIdx].length = arg->arrayBuffer->length;
+         } else if(arg->isAparapiBuffer()) {
+            ; // Currently we have no way to process local buffer.
+         }
+      } else if (arg->isLocal()) {
+				;  // Currently we have no way to process local buffer.
+      } else { // Process primitive arguments
+         if(arg->isFloat()) {
+						jfloat v;
+						BUFFER_SIZE += sizeof(jfloat);
+						arg->getPrimitive(jenv, argIdx, argPos, config->isVerbose(), &v);
+						tmpArgs[argIdx].value.f = v;
+					  tmpArgs[argIdx].size = sizeof(jfloat);
+						tmpArgs[argIdx].length = arg->arrayBuffer->length;
+				 }
+         else if(arg->isInt()) {
+            jint v;
+            BUFFER_SIZE += sizeof(jint);
+            arg->getPrimitive(jenv, argIdx, argPos, config->isVerbose(), &v);
+            tmpArgs[argIdx].value.i = v;
+            tmpArgs[argIdx].size = sizeof(jint);
+            tmpArgs[argIdx].length = arg->arrayBuffer->length;
+				 }
+         else if(arg->isBoolean()) {
+            jboolean v;
+            BUFFER_SIZE += sizeof(jboolean);
+            arg->getPrimitive(jenv, argIdx, argPos, config->isVerbose(), &v);
+            tmpArgs[argIdx].value.b = v;
+            tmpArgs[argIdx].size = sizeof(jboolean);
+            tmpArgs[argIdx].length = arg->arrayBuffer->length;
+				 }
+         else if(arg->isByte()) {
+            jbyte v;
+            BUFFER_SIZE += sizeof(jbyte);
+            arg->getPrimitive(jenv, argIdx, argPos, config->isVerbose(), &v);
+            tmpArgs[argIdx].value.B = v;
+            tmpArgs[argIdx].size = sizeof(jbyte);
+            tmpArgs[argIdx].length = arg->arrayBuffer->length;
+				 }
+         else if(arg->isLong()) {
+            jlong v;
+            BUFFER_SIZE += sizeof(jlong);
+            arg->getPrimitive(jenv, argIdx, argPos, config->isVerbose(), &v);
+            tmpArgs[argIdx].value.l = v;
+            tmpArgs[argIdx].size = sizeof(jlong);
+            tmpArgs[argIdx].length = arg->arrayBuffer->length;
+				 }
+         else if(arg->isDouble()) {
+            jdouble v;
+            BUFFER_SIZE += sizeof(jdouble);
+            arg->getPrimitive(jenv, argIdx, argPos, config->isVerbose(), &v);
+            tmpArgs[argIdx].value.d = v;
+            tmpArgs[argIdx].size = sizeof(jdouble);
+            tmpArgs[argIdx].length = arg->arrayBuffer->length;
+				 }
+      }
+   }  // for each arg
+
+	 if(config->isVerbose())
+      fprintf(stderr, "Total buffer size: %d\n", BUFFER_SIZE);
+
+   if((shmid = shmget(IPC_PRIVATE, BUFFER_SIZE, 0666)) < 0) {
+      fprintf(stderr, "shmget failed.");
+      return -1;
+   }
+   else {
+      if(config->isVerbose())
+         fprintf(stderr, "Create shared memory: %d\n", shmid);
+	 }
+
+	 shm_addr = (char *)shmat(shmid, 0, 0);
+   if((shm_addr) == (char *) -1) {
+      fprintf(stderr, "shmat failed.");
+      return -1;
+   }
+   else {
+      if(config->isVerbose())
+         fprintf(stderr, "Attach shared memory: %p\n", shm_addr);
+   }
+	 strncpy(shm_addr, Aparapi_tag, strlen(Aparapi_tag));
+   cur_addr = shm_addr + strlen(Aparapi_tag);
+   
+   // Put data into shared memory.
+   for (int argIdx = 0; argIdx < jniContext->argc; argIdx++) {
+			if(tmpArgs[argIdx].size == -1)
+				continue;
+			else if(tmpArgs[argIdx].length == 1)
+				memcpy(cur_addr, &(tmpArgs[argIdx].value), tmpArgs[argIdx].size);
+			else
+		    memcpy(cur_addr, tmpArgs[argIdx].addr, tmpArgs[argIdx].size); 
+			cur_addr += tmpArgs[argIdx].size;
+   }  // for each arg
+
+	 if(config->isVerbose())
+	    fprintf(stderr, "processArgsforExternal done\n");
+   return 1;
+}
+
+
+/**
  * enqueus the current kernel to run on opencl
  *
  * @param jniContext the context with the arguements
@@ -781,23 +1124,8 @@ void enqueueKernel(JNIContext* jniContext, Range& range, int passes, int argPos,
    jniContext->passes = passes;
    jniContext->exec = new ProfileInfo[passes];
 
-   jbyte* kernelOutBytes = jniContext->runKernelOutBytes;
-   int* kernelOutBytesAsInts = reinterpret_cast<int*>(kernelOutBytes);
-
-   jbyte* kernelInBytes = jniContext->runKernelInBytes;
-   int* kernelInBytesAsInts = reinterpret_cast<int*>(kernelInBytes);
-
    cl_int status = CL_SUCCESS;
    for (int passid=0; passid < passes; passid++) {
-	   
-	   int cancelCode = kernelInBytesAsInts[0];
-	   kernelOutBytesAsInts[0] = passid;
-
-	   if (cancelCode == CANCEL_STATUS_TRUE) {
-		   fprintf(stderr, "received cancellation, aborting at pass %d\n", passid);
-		   kernelOutBytes[0] = -1;
-		   break;
-	   }
 
       //size_t offset = 1; // (size_t)((range.globalDims[0]/jniContext->deviceIdc)*dev);
       status = clSetKernelArg(jniContext->kernel, argPos, sizeof(passid), &(passid));
@@ -893,7 +1221,39 @@ void enqueueKernel(JNIContext* jniContext, Range& range, int passes, int argPos,
       }
     
    }
-   kernelOutBytesAsInts[0] = PASS_ID_COMPLETED_EXECUTION;
+}
+
+
+/**
+ * Read results from shared memory.
+ * @param jniContext the context we got from Java
+ * @param shmid the ID of shared memory that we want to read
+ *
+ */
+int getResultFromSharedMemory(JNIEnv* jenv, JNIContext* jniContext, int shmid) {
+
+	 char *shm_addr = (char *)shmat(shmid, 0, 0);
+	 char *cur_addr = shm_addr + strlen(OpenCL_tag);
+
+   for(int i = 0; i < jniContext->argc; i++) {
+      KernelArg *arg = jniContext->args[i];
+
+      if (arg->needToEnqueueRead()){
+         if (arg->isConstant()){
+            ; // Currently we have no way to perform this.
+         }
+         if (config->isVerbose()){
+            fprintf(stderr, "reading buffer %d %s\n", i, arg->name);
+         }
+
+         if(arg->isArray()) {
+				    memcpy(arg->arrayBuffer->addr, cur_addr, arg->arrayBuffer->lengthInBytes);
+         } else if(arg->isAparapiBuffer()) {
+				    ; // We don't have to read buffer back for normal cases.
+         }
+      }
+   }
+   return 1;
 }
 
 
@@ -1070,7 +1430,7 @@ void checkEvents(JNIEnv* jenv, JNIContext* jniContext, int writeEventCount) {
 }
 
 JNI_JAVA(jint, KernelRunnerJNI, runKernelJNI)
-   (JNIEnv *jenv, jobject jobj, jlong jniContextHandle, jobject _range, jboolean needSync, jint passes, jobject inBuffer, jobject outBuffer) {
+   (JNIEnv *jenv, jobject jobj, jlong jniContextHandle, jobject _range, jboolean needSync, jint passes) {
       if (config == NULL){
          config = new Config(jenv);
       }
@@ -1079,16 +1439,7 @@ JNI_JAVA(jint, KernelRunnerJNI, runKernelJNI)
 
       cl_int status = CL_SUCCESS;
       JNIContext* jniContext = JNIContext::getJNIContext(jniContextHandle);
-	  jniContext->runKernelInBytes = (jbyte*)jenv->GetDirectBufferAddress(inBuffer);
-	  jniContext->runKernelOutBytes = (jbyte*)jenv->GetDirectBufferAddress(outBuffer);
 
-	  jbyte* kernelInBytes = jniContext->runKernelInBytes;
-	  int* kernelInBytesAsInts = reinterpret_cast<int*>(kernelInBytes);
-	  kernelInBytesAsInts[0] = CANCEL_STATUS_FALSE;
-
-	  jbyte* kernelOutBytes = jniContext->runKernelOutBytes;
-	  int* kernelOutBytesAsInts = reinterpret_cast<int*>(kernelOutBytes);
-	  kernelOutBytesAsInts[0] = PASS_ID_PREPARING_EXECUTION;
 
       if (jniContext->firstRun && config->isProfilingEnabled()){
          try {
@@ -1112,8 +1463,6 @@ JNI_JAVA(jint, KernelRunnerJNI, runKernelJNI)
             fprintf(stderr, "back from updateNonPrimitiveReferences\n");
          }
       }
-
-
       try {
          int writeEventCount = 0;
          processArgs(jenv, jniContext, argPos, writeEventCount);
@@ -1135,13 +1484,177 @@ JNI_JAVA(jint, KernelRunnerJNI, runKernelJNI)
       return(status);
    }
 
+JNI_JAVA(jint, KernelRunnerJNI, generateOpenCLHostJNI)
+   (JNIEnv *jenv, jobject jobj, jlong jniContextHandle, jobject _range, jstring filename) {
+      if (config == NULL){
+         config = new Config(jenv);
+      }
+
+      Range range(jenv, _range);
+
+      cl_int status = CL_SUCCESS;
+      JNIContext* jniContext = JNIContext::getJNIContext(jniContextHandle);
+
+      int argPos = 0;
+      // Need to capture array refs
+      try {
+         updateNonPrimitiveReferences(jenv, jobj, jniContext);
+      } catch (CLException& cle) {
+         cle.printError();
+      }
+      if (config->isVerbose()){
+         fprintf(stderr, "back from updateNonPrimitiveReferences\n");
+      }
+      try {
+				 generateOpenCLHost(jenv, jniContext, range, filename);
+//         enqueueKernel(jniContext, range, passes, argPos, writeEventCount);
+//         waitForReadEvents(jniContext, readEventCount, passes);
+//         checkEvents(jenv, jniContext, writeEventCount);
+      }
+      catch(CLException& cle) {
+         cle.printError();
+         return cle.status();
+      }
+
+      return status;
+   }
+
+
+JNI_JAVA(jint, KernelRunnerJNI, runExternalKernelJNI)
+   (JNIEnv *jenv, jobject jobj, jlong jniContextHandle, jobject _range, jstring kernel_filename) {
+
+		if (config == NULL){
+    	config = new Config(jenv);
+		}
+
+		if(config->isVerbose())
+			fprintf(stderr, "Run external kernel\n");
+
+    Range range(jenv, _range);
+
+		cl_int status = CL_SUCCESS;
+		JNIContext* jniContext = JNIContext::getJNIContext(jniContextHandle);
+
+		int argPos = 0;
+  	try {
+     	updateNonPrimitiveReferences(jenv, jobj, jniContext);
+    } catch (CLException& cle) {
+    	cle.printError();
+    }
+    if (config->isVerbose()){
+    	fprintf(stderr, "back from updateNonPrimitiveReferences\n");
+    }
+
+		try {
+			 int shmid;
+			 char *shm_addr;
+			 size_t BUFFER_SIZE; 
+			 if(!processArgsforExternal(jenv, jniContext, argPos, shmid, BUFFER_SIZE)) {
+          fprintf(stderr, "Create shared memory failed.");
+					return JNI_MEM_ERROR;
+			 }
+			 shm_addr = (char *)shmat(shmid, 0, 0);
+			 if(config->isVerbose()) {
+			    for(int i = 0; i < strlen(Aparapi_tag); ++i)
+			       fprintf(stderr, "%c", *(shm_addr + i));
+					fprintf(stderr, " ");
+	        unsigned char *pb = (unsigned char *) (shm_addr + strlen(Aparapi_tag));;
+          for(int i = 0; i < 8; ++i)
+             fprintf(stderr, "%02x ", pb[i]);
+          fprintf(stderr, "\n" );
+			 }
+
+			 pid_t pid;
+			 pid = fork();
+			 if(pid == 0) {
+			  if(config->isVerbose())
+					fprintf(stderr, "Launch OpenCL runtime\n");
+
+				// Process a command for executing OpenCL runtime.
+				char cmd_buf[2048];
+				char tmp_buf[64];
+				const char *tmpStr = jenv->GetStringUTFChars(kernel_filename, 0);
+				sprintf(cmd_buf, "%s_host.exe %s.xclbin %d ", tmpStr, tmpStr, shmid);
+		
+				// FIXME: Workgroup size (not a smart way.)
+				int gw(0);
+				for(int i = 0; i < jniContext->argc; ++i) {
+					KernelArg *arg = jniContext->args[i];
+					if(arg->isArray()) {
+						arg->syncJavaArrayLength(jenv);
+						gw = (int) pow((double) arg->arrayBuffer->length, 1.0 / ((double) range.dims));
+					}
+				}
+				// Global workgroup size.
+				for(int i = 0; i < range.dims; ++i) {
+					sprintf(tmp_buf, "%d ", gw);
+					strcat(cmd_buf, tmp_buf);
+				}
+				// Local workgroup size (should always be 1?)
+				for(int i = 0; i < range.dims; ++i) {
+					sprintf(tmp_buf, "%d ", 1);
+					strcat(cmd_buf, tmp_buf);
+				}
+				for(int i = 0; i < jniContext->argc; ++i) {
+					KernelArg *arg = jniContext->args[i];
+					if(arg->isArray()) { // FIXME: 1. Specify length of each dimension? 2. Buffer.
+						sprintf(tmp_buf, "%d ", arg->arrayBuffer->length);
+						strcat(cmd_buf, tmp_buf);
+					}
+					else
+						strcat(cmd_buf, "1 ");
+				}
+				strcat(cmd_buf, " 2> kernel_err.log");
+				jenv->ReleaseStringUTFChars(kernel_filename, tmpStr);
+				if(config->isVerbose())
+					fprintf(stderr, "Execute kernel: %s\n", cmd_buf);
+				system(cmd_buf);
+
+			  if(config->isVerbose())
+					fprintf(stderr, "Finish OpenCL runtime\n");
+				exit(0);
+			 }
+			 int status;
+			 waitpid(0, &status, 0);
+			 if(strncmp(shm_addr, OpenCL_tag, strlen(OpenCL_tag))) {
+			    fprintf(stderr, "Error: Tag not match. (");
+					for(int i = 0; i < strlen(OpenCL_tag); ++i)
+						fprintf(stderr, "%c", *(shm_addr + i));
+					fprintf(stderr, "), OpenCL failed.\n");
+					return CL_INVALID_PLATFORM;
+			 }
+
+			 if(config->isVerbose())
+				 fprintf(stderr, "Result received\n");
+
+			 getResultFromSharedMemory(jenv, jniContext, shmid);
+
+			 if((shmdt(shm_addr)) < 0) {
+			    fprintf(stderr, "WARNING: Shmdt failed.\n");
+			 }
+			 else {
+			    if(config->isVerbose())
+             fprintf(stderr, "Deattach shared memory\n");
+			}
+    }
+    catch(CLException& cle) {
+    	cle.printError();
+      jniContext->unpinAll(jenv);
+      return cle.status();
+    }
+
+	return (status);
+}
+
 
 // we return the JNIContext from here 
 JNI_JAVA(jlong, KernelRunnerJNI, initJNI)
    (JNIEnv *jenv, jobject jobj, jobject kernelObject, jobject openCLDeviceObject, jint flags) {
-      if (openCLDeviceObject == NULL){
-         fprintf(stderr, "no device object!\n");
-      }
+
+			// We don't need device if we want to use an external one.
+      //if (openCLDeviceObject == NULL){
+      //   fprintf(stderr, "no device object!\n");
+      //}
       if (config == NULL){
          config = new Config(jenv);
       }
@@ -1149,7 +1662,6 @@ JNI_JAVA(jlong, KernelRunnerJNI, initJNI)
       JNIContext* jniContext = new JNIContext(jenv, kernelObject, openCLDeviceObject, flags);
 
       if (jniContext->isValid()) {
-
          return((jlong)jniContext);
       } else {
          return(0L);

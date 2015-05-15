@@ -691,7 +691,6 @@ public class Entrypoint implements Cloneable {
          }
 
          for (final String referencedFieldName : referencedFieldNames) {
-
             try {
                final Class<?> clazz = classModel.getClassWeAreModelling();
                final Field field = getFieldFromClassHierarchy(clazz, referencedFieldName);
