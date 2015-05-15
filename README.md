@@ -1,5 +1,3 @@
-Contributor: Cody Hao Yu
-
 Description
 =======
 This is a fork of APARAPI from https://github.com/aparapi/aparapi that is customized for running on other external devices.
