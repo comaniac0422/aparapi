@@ -20,7 +20,7 @@ ant clean build dist
 
 - Sample run: 
 
-1.	Generate OpenCL source code:
+1. Generate OpenCL source code:
 
 cd samples/mmul
 
@@ -28,6 +28,8 @@ cd samples/mmul
 
 ./run.sh EXT
 
-2.	Synthesize OpenCL kernel and put the host and bit-stream together with the original Java class files.
+2. Synthesize OpenCL kernel and put the host and bit-stream together with the original Java class files.
 
-3.	./run.sh EXT
+3. Execute application on FPGA.
+
+./run.sh EXT
