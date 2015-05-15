@@ -33,3 +33,9 @@ cd samples/mmul
 -Execute application on FPGA.
 
 ./run.sh EXT
+
+To Do
+======
+- Generated host: self-test.
+- Introduce more Java language features.
+- Include GATK, Mlib applications.
