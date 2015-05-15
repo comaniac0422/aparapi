@@ -14,6 +14,6 @@ How to Use
 ======
 - Build
 
--- ant clean build dist
+ant clean build dist
 
 - Run: 
