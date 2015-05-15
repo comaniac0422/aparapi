@@ -21,8 +21,11 @@ ant clean build dist
 - Sample run: 
 
 1.	Generate OpenCL source code:
+
 cd samples/mmul
+
 ./build_jar.sh
+
 ./run.sh EXT
 
 2.	Synthesize OpenCL kernel and put the host and bit-stream together with the original Java class files.
